@@ -157,17 +157,19 @@ class DuelingDiscreteSAC(RL_Algo):
 
     def update_step(self, s, a , r, s_next, done):
 
+        q1_targs, q2_targs = self.q1_targ(s_next), self.q2_targ(s_next)
+
+        min_q = tf.reduce_min(tf.stack([q1_targs, q2_targs]), axis = 0)
+
+        next_state_distribution = self.policy(s_next)
+
+        v_estimate = self.expectation_over_actions(next_state_distribution, min_q)
+
+        q_target = r + self.discount * (1. - tf.dtypes.cast(done, 'float32')) * v_estimate
+
         with tf.GradientTape(persistent = True) as tape:
 
-            q1_targs, q2_targs = self.q1_targ(s_next), self.q2_targ(s_next)
-
-            min_q = tf.reduce_min(tf.stack([q1_targs, q2_targs]), axis = 0)
-
             action_distribution = self.policy(s)
-
-            v_estimate = self.expectation_over_actions(action_distribution, min_q)
-
-            q_target = r + self.discount * (1. - tf.dtypes.cast(done, 'float32')) * v_estimate
 
             q1_vals, q2_vals = self.q1(s), self.q2(s)
             #use targets to compute losses
@@ -175,7 +177,7 @@ class DuelingDiscreteSAC(RL_Algo):
             q2_loss, _ = self.q_loss(q2_vals, a, q_target)
 
             #want to minimize the negative of the maximization objective
-            policy_loss = -1 * tf.reduce_mean(self.expectation_over_actions(action_distribution, q1_vals))
+            policy_loss = -1 * tf.reduce_mean(self.expectation_over_actions(action_distribution, q1_vals))-
 
         q1_grads, q2_grads = tape.gradient(q1_loss, self.q1.trainable_weights), tape.gradient(q2_loss, self.q2.trainable_weights)
         policy_grads = tape.gradient(policy_loss, self.policy.trainable_weights)

@@ -67,6 +67,7 @@ class EnvWrapper():
         self.state_lag = state_lag
         self.output_fn = output_processing_fn
         self.reset()
+        self.action_space = env.action_space
 
     def push_state(self, new_state):
         self.state_buffer.insert(0, new_state)
@@ -103,7 +104,7 @@ class EnvWrapper():
             #print('c')
             return (len(state), self.infer_state_shape(state[0]))
         else:
-            return 1
+            raise TypeError('State must contain only tuples, lists, or numpy arrays')
         
 class DiscreteEpisodicRL():
 
@@ -128,8 +129,7 @@ class DiscreteEpisodicRL():
                 if self.train_steps > random_threshold:
                     action = self.algo.get_action(state)
                 else:
-                    #sample the next action randomly
-                    pass
+                    action = env.action_space.sample()
                 
                 state_next, reward, done, _ = env.step(action)
 

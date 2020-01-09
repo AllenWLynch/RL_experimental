@@ -17,16 +17,13 @@ def gen_state(shapes):
     return np.zeros(state_shape), np.zeros(action_shape)
 
 def concat_states_actions(x):
-    return (np.concatenate([state for state, action in x], axis = -1), np.concatenate([action for state, action in x], axis = -1))
+    states, actions = list(zip(*x))
+    return np.concatenate([*states, actions[-1]], axis = -1)
 
-env_wrapper = EnvWrapper(env, gen_state, reward_scale = 0.01, state_lag = 8, 
+env_wrapper = EnvWrapper(env, gen_state, reward_scale = 0.01, state_lag = 10, 
     state_processing_function = one_hot_action_in_state(NUM_ACTIONS), output_processing_fn = concat_states_actions)
 
 state_shape = env_wrapper.get_state_shape()
-
-print(state_shape)
-
-assert(False)
 
 q_net = networks.SimpleDueling((50,50),state_shape,NUM_ACTIONS)
 
@@ -41,7 +38,7 @@ algo = DuelingDiscreteSAC(
                 q_net, 
                 tf.keras.optimizers.Adam,  
                 3e-4,
-                0.15,
+                0.2,
                 DISCOUNT,
                 state_shape,
                 soft_update_beta=0.995
@@ -49,5 +46,4 @@ algo = DuelingDiscreteSAC(
 
 trainer = DiscreteEpisodicRL(algo, Replay(1e6), './logs')
 
-trainer.train(env_wrapper, 1, 1000, render = True, initial_random_steps=1e4)
-
+trainer.train(env_wrapper, 1, 1000, render = True, initial_random_steps=0)
