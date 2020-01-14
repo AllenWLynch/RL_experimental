@@ -3,7 +3,7 @@ import tensorflow as tf
 import numpy as np
 import gym
 import networks
-from SAC_algos import DiscreteSACwithValueNet, DuelingDiscreteSAC
+from SAC_algos import DuelingDiscreteSAC
 from utils import Replay, DiscreteEpisodicRL, EnvWrapper, concat_time_series, one_hot_action_in_state
 
 
@@ -35,14 +35,9 @@ policy_net.add(tf.keras.layers.Softmax())
 
 algo = DuelingDiscreteSAC(
                 policy_net,
-                q_net, 
-                tf.keras.optimizers.Adam,  
-                3e-4,
-                0.2,
-                DISCOUNT,
-                state_shape,
-                soft_update_beta=0.995
-)
+                q_net,
+                state_shape, 
+                NUM_ACTIONS)
 
 trainer = DiscreteEpisodicRL(algo, Replay(1e6), './logs')
 

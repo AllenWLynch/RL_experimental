@@ -11,7 +11,6 @@ def SimpleDense(layers):
         model.add(tf.keras.layers.ReLU())
     return model
 
-
 def SimpleDueling(layers, input_shape, num_actions):
 
     state = tf.keras.Input(shape = input_shape)
@@ -74,7 +73,6 @@ class TransformerMaskGenerator(tf.keras.layers.Layer):
         softmax_mask =  state_square * tf.expand_dims(self.combined_mask,0)
 
         return softmax_mask, state_mask * burn_in_mask
-
 
 class ImageTransformerLayer(tf.keras.layers.Layer):
 
@@ -145,13 +143,15 @@ class ImageTransformerLayer(tf.keras.layers.Layer):
 
         return output
 
-
 class RelativePositionalEncoder(tf.keras.layers.Layer):
 
-    def __init__(self, max_relative_distance, **kwargs):
+    def __init__(self, max_relative_distance, clipping_fn = None, **kwargs):
         super().__init__(**kwargs)
         self.max_relative_distance = max_relative_distance
-        self.clipping_fn = lambda x,s : tf.maximum(-s, tf.minimum(s, x))
+        if clipping_fn is None:
+            self.clipping_fn = lambda x,s : tf.maximum(-s, tf.minimum(s, x))
+        else:
+            self.clipping_fn = clipping_fn
 
     def build(self, input_shape):
         
@@ -189,7 +189,7 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 
         return output
 
-def ImageTransformer(input_shape, max_embedding_distance, num_layers):
+def ImageTransformer(input_shape, max_embedding_distance, num_layers, clipping_fn = None):
 
     (d, h, w, nc) = input_shape
 
@@ -199,7 +199,7 @@ def ImageTransformer(input_shape, max_embedding_distance, num_layers):
 
     burn_in_mask = tf.keras.Input(shape = (d,), name = 'burn-in_mask')
 
-    positional_embedder = RelativePositionalEncoder(max_embedding_distance)
+    positional_embedder = RelativePositionalEncoder(max_embedding_distance, clipping_fn = clipping_fn)
 
     softmax_mask, loss_mask = TransformerMaskGenerator()((state_mask, burn_in_mask))
 
@@ -210,7 +210,7 @@ def ImageTransformer(input_shape, max_embedding_distance, num_layers):
 
     return tf.keras.Model(inputs = [X, state_mask, burn_in_mask], outputs = [attn, loss_mask])
 
-def DiscreteQ_Transformer(input_shape, filter_sizes, max_embedding_distance):
+def DiscreteQ_Transformer(input_shape, filter_sizes, max_embedding_distance, num_actions, clipping_fn = None):
     #(depth, h, w, nc) = input_shape
 
     assert(len(filter_sizes) == 4), 'Must provide four filter sizes as a tuple ex: (4, 4, 3, 3)'
@@ -231,12 +231,12 @@ def DiscreteQ_Transformer(input_shape, filter_sizes, max_embedding_distance):
 
     #in: 16
     #advantage stream
-    A, loss_mask = ImageTransformer(X.get_shape(), max_embedding_distance, 3)
+    A, loss_mask = ImageTransformer(X.get_shape(), max_embedding_distance, 3, clipping_fn = clipping_fn)
     A = tf.keras.layers.Flatten()(A)
     A = tf.keras.layers.Dense(num_actions)(A)
 
     #value stream
-    V, _ = ImageTransformer(X.get_shape(), max_embedding_distance, 3)
+    V, _ = ImageTransformer(X.get_shape(), max_embedding_distance, 3, clipping_fn = clipping_fn)
     V = tf.keras.layers.Flatten()(V)
     V = tf.keras.layers.Dense(1)(V)
 

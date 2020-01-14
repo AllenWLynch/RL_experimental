@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 from utils import RL_Algo
 
-class DuelingDiscreteSAC(RL_Algo):
+class MarkovDuelingDiscreteSAC(RL_Algo):
 
     def __init__(self, 
                 policy_architecture,
@@ -101,29 +101,10 @@ class DuelingDiscreteSAC(RL_Algo):
         self.update_targ_network(self.q1_targ, self.q1.get_weights())
         self.update_targ_network(self.q2_targ, self.q2.get_weights())
         
-        all_td_errors = tf.concat([td_error1, td_error2], axis = -1)
-        mean_td_error = tf.reduce_mean(all_td_errors)
-        
-        return all_td_errors, (q1_loss, q2_loss, policy_loss, mean_entropy_loss, mean_td_error), ('Q1 loss', 'Q2 loss', 'Policy loss', 'Entropy loss', 'TD error')
+        return (q1_loss, q2_loss, policy_loss, mean_entropy_loss, 0.5 * (td_error2 + td_error1)), ('Q1 loss', 'Q2 loss', 'Policy loss', 'Entropy loss', 'TD error')
 
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
+    def get_action(self, state):
+        #print(state, self.policy(tf.expand_dims(state, 0)))
+        #assert(False)
+        distribution = (self.policy(tf.expand_dims(state, 0))[0]).numpy()
+        return np.random.choice(len(distribution), p = distribution)        

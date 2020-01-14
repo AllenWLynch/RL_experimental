@@ -1,11 +1,44 @@
-from collections import namedtuple
 import numpy as np
+from collections import namedtuple
 import random
 import tensorflow as tf
 
-Transition = namedtuple('Transition', ('state','action','reward','next_state', 'done'))
+class Agent():
 
-class Replay():
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def get_action(self, state):
+        raise NotImplementedError()
+
+class SequentialAgent(Agent):
+
+    def get_action(self, state, is_state):
+        raise NotImplementedError()
+
+class RandomAgent(Agent):
+
+    def __init__(self, num_actions):
+        self.num_actions = 2
+
+    def get_action(self, state, state_mask = None):
+        return int(np.random.choice(np.arange(self.num_actions)))
+
+class PolicyAgent(Agent):
+
+    def __init__(self, policy, noise = 0):
+        self.policy = policy
+        self.noise = noise
+        #self.num_actions = num_actions
+
+    def get_action(self, state, state_mask = None):
+        distribution = (self.policy(np.expand_dims(state, 0))[0]).numpy()
+        if self.noise > 0:
+            raise NotImplementedError()
+
+        return np.random.choice(len(distribution), p = distribution)
+
+class NaiveReplay():
 
     def __init__(self, size):
         self.size = size
@@ -14,7 +47,7 @@ class Replay():
     def add(self, *args):
         if len(self.memory) > self.size:
             self.memory.pop()
-        self.memory.insert(0, Transition(*args))
+        self.memory.insert(0, MarkovTransition(*args))
 
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
@@ -22,76 +55,83 @@ class Replay():
     def num_samples(self):
         return len(self.memory)
 
-class RL_Algo():
+#remake this
+def get_n_step_Q_targets(reward_sequence, lookahead_steps, done, discount, last_V_estimate):
 
-    def __init__(self):
-        raise NotImplementedError()
+    (m, N) = reward_sequence.shape
 
-    def update_step(self):
-        raise NotImplementedError()
+    assert(done.shape == last_V_estimate.shape), 'Done and last_V_estimate must have same dimensions: (m, 1)'
+    assert(done[0] == m)
+    assert(done[1] == 1)
+    
+    last_V_estimate *= (1 - done)
 
-    def get_action_distribution(self):
-        raise NotImplementedError()
+    reward_sequence = np.expand_dims(np.concatenate([reward_sequence, last_V_estimate], axis = -1), 1)
 
+    upper_tri = np.tri(N + 1).T
 
-def unmodified_state_fn(**kwargs):
-    return kwargs['state']
+    R = reward_sequence * upper_tri
 
-def concat_time_series(state):
-    return tf.concat(state, axis = -1)
+    k = np.arange(N + 1)[:, np.newaxis]
 
-class one_hot_action_in_state():
+    K = k.T - k
 
-    def __init__(self, num_actions):
-        self.num_actions = num_actions
+    discount_matrix = discount ** K
 
-    def __call__(self, **kwargs):
-        state = kwargs['state']
-        action = np.zeros(self.num_actions)
-        if 'action' in kwargs:
-            action[kwargs['action']] = 1
-        return (state, action)
+    bootstrapped_rewards = R * discount_matrix #element-wise
 
-class EnvWrapper():
+    reward_sums = np.sum(bootstrapped_rewards, axis = -1, keepdims = True)
 
-    def __init__(self, env, state_generator_fn,reward_scale = 1.0, state_lag = 1,
-                state_processing_function = unmodified_state_fn, output_processing_fn = lambda x : x):
-        self.reward_scale = reward_scale
-        self.env = env
-        self.processing_fn = state_processing_function
-        self.state_generator = state_generator_fn
+    return np.squeeze(reward_sums)[:,:-1]
 
-        start_state = self.processing_fn(state = env.reset())
-        self.state_shape = self.infer_state_shape(start_state)
+'''r = np.array([[1,2,3,4],[2,4,6,8]])
+V = np.array([[5],[10]])
+done = np.array([[True],[False]])
+discount = 0.5
+print(get_Q_targets(r, done, discount, V))'''
 
-        self.state_lag = state_lag
-        self.output_fn = output_processing_fn
+def unzip_batch_samples(batch):
+    return map(lambda x : np.array(x).astype('float32'), list(zip(*batch)))
+
+def calculate_n_step_priority(td_errors, nu):
+    # p = η maxi δi + (1 − η)δ-
+    assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
+    return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
+
+InteractionSequence = namedtuple('InteractionSequence', ('states','actions','rewards','is_state','done'))
+
+MarkovTransition = namedtuple('MarkovTransition', ('state','action','reward','next_state', 'done'))
+
+class MarkovStateManager():
+    
+    def __init__(self, agent, simulator, render = True,
+        max_episode_len = np.inf, preprocessing_function = lambda x, a : x, reward_fn = lambda x : x):
+
+        self.env = simulator
+        self.reward_fn = reward_fn
+        self.phi = preprocessing_function
+        self.agent = agent
+        self.render = render
+
+        self.max_t = max_episode_len
+        self.t = 0
+
+        self.state_shape = self.infer_state_shape(self.phi(self.env.reset(), None))
+        #blank_state_shape = self.infer_state_shape(self.state_generator())
+        
+        #assert(example_state_shape == blank_state_shape), 'States from preprocessing funtion and blank state generator must have the same shape: {} vs. {}'.format(str(example_state_shape), str(blank_state_generator))
         self.reset()
-        self.action_space = env.action_space
-
-    def push_state(self, new_state):
-        self.state_buffer.insert(0, new_state)
-        self.state_buffer.pop()
-
-    def step(self, action):
-        state, reward, done, info = self.env.step(action)
-        state = self.processing_fn(state = state, action = action)
-        self.push_state(state)
-        return (self.output_fn(self.state_buffer), reward * self.reward_scale, done, info)
+        
+    def get_state_shape(self):
+        return self.state_shape
 
     def reset(self):
-        start_state = self.processing_fn(state = self.env.reset())
-        self.state_buffer = [self.state_generator(self.state_shape) for i in range(self.state_lag)]
-        self.push_state(start_state)
-        return self.output_fn(self.state_buffer)
 
-    def render(self):
-        self.env.render()
+        self.t = 0
+        #self.interaction_history = [Interaction(self.state_generator(), 0, 0, False) for i in range(self.seq_len)]
+        self.state = self.phi(self.env.reset(), None)
+        #self.save_memory(self.state, 0, 0)
 
-    def get_state_shape(self):
-        return self.infer_state_shape(self.output_fn(self.state_buffer))
-
-    #can be composed of tuples or ndarrays
     def infer_state_shape(self, state):
         #print(state)
         if type(state) == tuple:
@@ -105,14 +145,158 @@ class EnvWrapper():
             return (len(state), self.infer_state_shape(state[0]))
         else:
             raise TypeError('State must contain only tuples, lists, or numpy arrays')
+
+    def run(self):
+
+        self.reset()
+
+        while True:
+
+            action = self.agent.get_action(self.state)
+
+            self.t += 1
+
+            next_state, reward, done, _ = self.env.step(action)
+            next_state = self.phi(next_state, action)
+            reward = self.reward_fn(reward)
+
+            #self.save_memory(self.state, action, reward, done)
+            if self.render:
+                self.env.render()
+
+            yield MarkovTransition(self.state, [action], [reward], next_state, [done])
+
+            self.state = next_state
+
+            if done or self.t >= self.max_t:
+                self.reset()
+
+class SequentialStateManager(MarkovStateManager):
+
+    def __init__(self, agent, simulator, blank_state_generator, render = True, seq_len = 40, overlap = 0,
+                max_episode_len = np.inf, preprocessing_function = lambda x, a : x, reward_fn = lambda x : x):
+
+        self.env = simulator
+        self.reward_fn = reward_fn
+        self.phi = preprocessing_function
+        self.state_generator = blank_state_generator
+        self.seq_len = seq_len
+        self.overlap = overlap
+        self.agent = agent
+        self.render = render
+
+        self.max_t = max_episode_len
+        self.t = 0
+
+        example_state_shape = self.infer_state_shape(self.phi(self.env.reset(), None))
+        blank_state_shape = self.infer_state_shape(self.state_generator())
         
+        assert(example_state_shape == blank_state_shape), 'States from preprocessing funtion and blank state generator must have the same shape: {} vs. {}'.format(str(example_state_shape), str(blank_state_generator))
+        self.reset()
+        
+    def push_interaction(self, state, action, reward):
+        for newval, history in zip((state, action, reward, True), (self.state_history, self.action_history, self.reward_history, self.is_state)):
+            history.insert(0, newval)
+            del history[-1]
+
+    def get_state_shape(self):
+        return self.infer_state_shape(self.get_policy_history())
+
+    def get_policy_history(self):
+        return np.array(self.state_history)
+
+    def reset(self):
+
+        self.t = 0
+
+        self.state_history = [self.state_generator() for i in range(self.seq_len)]
+        self.action_history = [0 for i in range(self.seq_len)]
+        self.reward_history = [0 for i in range(self.seq_len)]
+        self.is_state = [False for i in range(self.seq_len)]
+        
+        self.state = self.phi(self.env.reset(), None)
+
+    def run(self):
+
+        while True:
+
+            action = self.agent.get_action(np.array(self.state_history).astype('float32'), np.array(self.is_state).astype('bool'))
+            
+            self.t += 1
+
+            next_state, reward, done, _ = self.env.step(action)
+            next_state = self.phi(next_state, action)
+            reward = self.reward_fn(reward)
+            self.push_interaction(self.state, action, reward)
+
+            self.state = next_state
+
+            if self.render:
+                self.env.render()
+
+            if done or self.t % (self.seq_len - self.overlap) == 0 or self.t >= self.max_t:
+                print(self.t)
+                yield InteractionSequence(
+                        np.array(self.state_history).astype('float32'), 
+                        np.array(self.action_history).astype('float32'), 
+                        np.array(self.reward_history).astype('float32'),
+                        np.array(self.is_state).astype('bool'),
+                        np.array([done]).astype('bool'),
+                        )
+                if done or self.t > self.max_t:
+                    self.reset()
+
+class LocalSynchronousActor():
+
+    def __init__(self, state_manager, memory):
+        self.state_manager = state_manager
+        self.memory = memory
+
+    def run(self):
+        for transition in self.state_manager.run():
+            self.memory.add(transition)
+            yield
+
+class PrioritizedLocalSynchronousLearner():
+
+    def __init__(self, rl_algo, memory, steps_per_epoch, epochs = 100, checkpoint_every = 10, logdir = './logs'):
+
+        self.algo = rl_algo
+        self.memory = memory
+        self.logger = tf.summary.create_file_writer(logdir)
+        self.train_steps = 0
+        self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
+
+    def train_step(self, batch_size):
+
+        if self.memory.num_samples() > batch_size:
+                
+            memory_sample = self.memory.sample(batch_size)
+
+            #s, a, r, s_next, dones = [tf.stack(sample) for sample in zip(*memory_sample)]
+
+            td_errors, vals, metric_names = self.algo.update_step(memory_sample)
+
+            #update memory
+            #
+
+            with self.logger.as_default():
+                for (val, metric) in zip(vals, metric_names):
+                    tf.summary.scalar(metric, val, step = self.train_steps)
+
+        self.train_steps += 1
+
+
+    
+
+
 class DiscreteEpisodicRL():
 
     def __init__(self, algo, replay_buffer, logdir):
         self.algo = algo
         self.replay = replay_buffer
-        self.train_steps = 0
-        self.episodes = 0
+        
         self.logger = tf.summary.create_file_writer(logdir)
 
     def train_episode(self, env, random_threshold, batch_size = 64, t_max = np.inf, render = False):
@@ -143,20 +327,7 @@ class DiscreteEpisodicRL():
                 rewards.append(reward)
 
                 #update step
-                if self.replay.num_samples() > batch_size:
                 
-                    memory_sample = self.replay.sample(batch_size)
-
-                    s, a, r, s_next, dones = [tf.stack(sample) for sample in zip(*memory_sample)]
-
-                    vals, metric_names = self.algo.update_step(s, a, r, s_next, dones)
-
-                    with self.logger.as_default():
-                        for (val, metric) in zip(vals, metric_names):
-                            tf.summary.scalar(metric, val, step = self.train_steps)
-
-                t += 1
-                self.train_steps += 1
 
             self.episodes += 1
 
@@ -174,3 +345,14 @@ class DiscreteEpisodicRL():
                 print('\rEpisode: {}'.format(str(episode)), end = '')
                 
             print('Epoch {} complete, evaluating results.'.format(str(epoch)))
+
+
+
+
+
+
+
+
+
+
+
