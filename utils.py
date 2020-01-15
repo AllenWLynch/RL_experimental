@@ -3,6 +3,14 @@ from collections import namedtuple
 import random
 import tensorflow as tf
 
+class RL_Algo():
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def update_step(self, *args):
+        raise NotImplementedError()
+
 class Agent():
 
     def __init__(self, *args, **kwargs):
@@ -90,14 +98,6 @@ done = np.array([[True],[False]])
 discount = 0.5
 print(get_Q_targets(r, done, discount, V))'''
 
-def unzip_batch_samples(batch):
-    return map(lambda x : np.array(x).astype('float32'), list(zip(*batch)))
-
-def calculate_n_step_priority(td_errors, nu):
-    # p = η maxi δi + (1 − η)δ-
-    assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
-    return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
-
 InteractionSequence = namedtuple('InteractionSequence', ('states','actions','rewards','is_state','done'))
 
 MarkovTransition = namedtuple('MarkovTransition', ('state','action','reward','next_state', 'done'))
@@ -160,7 +160,6 @@ class MarkovStateManager():
             next_state = self.phi(next_state, action)
             reward = self.reward_fn(reward)
 
-            #self.save_memory(self.state, action, reward, done)
             if self.render:
                 self.env.render()
 
@@ -238,7 +237,7 @@ class SequentialStateManager(MarkovStateManager):
                 print(self.t)
                 yield InteractionSequence(
                         np.array(self.state_history).astype('float32'), 
-                        np.array(self.action_history).astype('float32'), 
+                        np.array(self.action_history).astype('int32'), 
                         np.array(self.reward_history).astype('float32'),
                         np.array(self.is_state).astype('bool'),
                         np.array([done]).astype('bool'),
@@ -246,105 +245,61 @@ class SequentialStateManager(MarkovStateManager):
                 if done or self.t > self.max_t:
                     self.reset()
 
-class LocalSynchronousActor():
+class PrioritizedLearner():
 
-    def __init__(self, state_manager, memory):
-        self.state_manager = state_manager
-        self.memory = memory
-
-    def run(self):
-        for transition in self.state_manager.run():
-            self.memory.add(transition)
-            yield
-
-class PrioritizedLocalSynchronousLearner():
-
-    def __init__(self, rl_algo, memory, steps_per_epoch, epochs = 100, checkpoint_every = 10, logdir = './logs'):
+    def __init__(self, rl_algo, steps_per_epoch, batch_size, priority_nu = 0.7, checkpoint_every = 10, logdir = './logs'):
 
         self.algo = rl_algo
-        self.memory = memory
         self.logger = tf.summary.create_file_writer(logdir)
         self.train_steps = 0
-        self.epochs = epochs
+        self.checkpoint_every = checkpoint_every
         self.steps_per_epoch = steps_per_epoch
+        self.batch_size = batch_size
+        self.nu = priority_nu
 
-    def train_step(self, batch_size):
+    def unzip_batch_samples(self, batch):
+        return map(lambda x : np.array(x), list(zip(*batch)))
 
-        if self.memory.num_samples() > batch_size:
-                
-            memory_sample = self.memory.sample(batch_size)
+    def calculate_priority(self, td_errors, nu):
+        # p = η maxi δi + (1 − η)δ-
+        assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
+        return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
 
-            #s, a, r, s_next, dones = [tf.stack(sample) for sample in zip(*memory_sample)]
-
-            td_errors, vals, metric_names = self.algo.update_step(memory_sample)
-
-            #update memory
-            #
-
-            with self.logger.as_default():
-                for (val, metric) in zip(vals, metric_names):
-                    tf.summary.scalar(metric, val, step = self.train_steps)
+    def update_step(self, prioritized_replay_sample):
 
         self.train_steps += 1
+        if self.train_steps % self.steps_per_epoch == 0:
+            epoch_num = self.train_steps // self.steps_per_epoch
+            print('\nEpoch {}'.format(epoch_num))
+            if epoch_num % self.checkpoint_every == 0:
+                print('Saving Checkpoint!')
 
-
-    
-
-
-class DiscreteEpisodicRL():
-
-    def __init__(self, algo, replay_buffer, logdir):
-        self.algo = algo
-        self.replay = replay_buffer
+        print('\rTrain step: {}'.format(str(self.train_steps)), end = '')
         
-        self.logger = tf.summary.create_file_writer(logdir)
+        (batch, idx, importance_weight) = prioritized_replay_sample
 
-    def train_episode(self, env, random_threshold, batch_size = 64, t_max = np.inf, render = False):
+        importance_weight = np.array(importance_weight).reshape((-1,1)).astype('float32')
 
-            state = env.reset()      
+        td_errors, vals, metric_names = self.algo.update_step(*self.unzip_batch_samples(batch), weights = importance_weight)
 
-            done = False
-            t = 0
-            rewards = []
+        td_errors = self.calculate_priority(td_errors, self.nu)
 
-            while not done and t < t_max:
-                
-                #sample step
-                if self.train_steps > random_threshold:
-                    action = self.algo.get_action(state)
-                else:
-                    action = env.action_space.sample()
-                
-                state_next, reward, done, _ = env.step(action)
+        with self.logger.as_default():
+            for (val, metric) in zip(vals, metric_names):
+                tf.summary.scalar(metric, val, step = self.train_steps)
 
-                if render:
-                    env.render()
+        return idx, td_errors.reshape(-1)
 
-                self.replay.add(state, [action], [reward], state_next, [done])
+def train_prioritized_undistributed(actor, learner, memory, env_steps = 1):
 
-                state = state_next
+    actor_iter = iter(actor.run())
 
-                rewards.append(reward)
-
-                #update step
-                
-
-            self.episodes += 1
-
-            with self.logger.as_default():
-                tf.summary.scalar('Returns', sum(rewards), step = self.episodes)
-
-    def train(self, env, epochs, episodes_per_epoch, batch_size = 64, t_max = np.inf, render = False, initial_random_steps = 1e4):
-
-        for epoch in range(1, epochs + 1):
-
-            print('Epoch {}'.format(str(epoch)))
-            for episode in range(1, episodes_per_epoch + 1):
-
-                self.train_episode(env, initial_random_steps, batch_size, t_max, render=render)
-                print('\rEpisode: {}'.format(str(episode)), end = '')
-                
-            print('Epoch {} complete, evaluating results.'.format(str(epoch)))
+    while True:
+        for i in range(env_steps):
+            memory.add(next(actor_iter))
+        if memory.num_samples() > learner.batch_size:
+            for idx, error in zip(*learner.update_step(memory.sample(learner.batch_size))):
+                memory.update(idx, error)
 
 
 
