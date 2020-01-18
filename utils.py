@@ -2,6 +2,7 @@ import numpy as np
 from collections import namedtuple
 import random
 import tensorflow as tf
+import threading
 
 class RL_Algo():
 
@@ -10,6 +11,14 @@ class RL_Algo():
 
     def update_step(self, *args):
         raise NotImplementedError()
+
+def unzip_batch_samples(batch):
+    return map(lambda x : np.array(x), list(zip(*batch)))
+
+def calculate_priority(self, td_errors, nu):
+    # p = η maxi δi + (1 − η)δ-
+    assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
+    return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
 
 class Agent():
 
@@ -35,16 +44,43 @@ class RandomAgent(Agent):
 class PolicyAgent(Agent):
 
     def __init__(self, policy, noise = 0):
+        assert(False), 'Dont use this one use the prioritized guy'
         self.policy = policy
         self.noise = noise
         #self.num_actions = num_actions
 
     def get_action(self, state, state_mask = None):
-        distribution = (self.policy(np.expand_dims(state, 0))[0]).numpy()
+        policy_output = self.policy(np.expand_dims(state, 0))[0]
+        distribution = (policy_output).numpy()
         if self.noise > 0:
             raise NotImplementedError()
 
         return np.random.choice(len(distribution), p = distribution)
+
+class PrioritizedPolicyAgent(PolicyAgent):
+
+    def __init__(self, policy, q_net, q_targ, discount):
+        self.policy = policy
+        self.q_net = q_net
+        self.q_targ = q_targ
+        self.discount = discount
+        self.noise = 0
+
+    def estimate_batch_priorities(self, batch):
+        state, action, rewards, next_states, dones = unzip_batch_samples(batch)
+
+        q_vals = tf.gather(self.q_net(state), action, axis = -1, batch_dims = 1)
+
+        next_qs = self.q_targ(next_states)
+        max_next_action = tf.math.argmax(next_qs, axis = -1)
+        
+        max_next_action = tf.reshape(max_next_action, (-1,1))
+
+        v_estimates = tf.gather(next_qs, max_next_action, axis = -1, batch_dims = 1)
+
+        q_target = rewards + self.discount * (1. - tf.dtypes.cast(dones, 'float32')) * v_estimates
+
+        return tf.math.abs(q_vals - q_target).numpy().reshape(-1) 
 
 class NaiveReplay():
 
@@ -257,14 +293,6 @@ class PrioritizedLearner():
         self.batch_size = batch_size
         self.nu = priority_nu
 
-    def unzip_batch_samples(self, batch):
-        return map(lambda x : np.array(x), list(zip(*batch)))
-
-    def calculate_priority(self, td_errors, nu):
-        # p = η maxi δi + (1 − η)δ-
-        assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
-        return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
-
     def update_step(self, prioritized_replay_sample):
 
         self.train_steps += 1
@@ -280,9 +308,9 @@ class PrioritizedLearner():
 
         importance_weight = np.array(importance_weight).reshape((-1,1)).astype('float32')
 
-        td_errors, vals, metric_names = self.algo.update_step(*self.unzip_batch_samples(batch), weights = importance_weight)
+        td_errors, vals, metric_names = self.algo.update_step(*unzip_batch_samples(batch), weights = importance_weight)
 
-        td_errors = self.calculate_priority(td_errors, self.nu)
+        td_errors = calculate_priority(td_errors, self.nu)
 
         with self.logger.as_default():
             for (val, metric) in zip(vals, metric_names):
@@ -300,14 +328,3 @@ def train_prioritized_undistributed(actor, learner, memory, env_steps = 1):
         if memory.num_samples() > learner.batch_size:
             for idx, error in zip(*learner.update_step(memory.sample(learner.batch_size))):
                 memory.update(idx, error)
-
-
-
-
-
-
-
-
-
-
-

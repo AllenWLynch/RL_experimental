@@ -9,10 +9,10 @@ class MarkovDuelingDiscreteSAC(RL_Algo):
                 q_architecture, 
                 state_shape,
                 num_actions,
+                discount,
                 optimizer = tf.keras.optimizers.Adam,
                 learning_rate = 0.0003,
                 soft_update_beta = 0.995,
-                discount = 0.99,
                 initial_entropy = 1.0):
         # init parameters
         input_shape = (None, *state_shape)
@@ -122,10 +122,10 @@ class SequentialDuelingDiscreteSAC(RL_Algo):
                 q_architecture, 
                 state_shape,
                 num_actions,
+                discount,
                 optimizer = tf.keras.optimizers.Adam,
                 learning_rate = 0.0003,
                 soft_update_beta = 0.995,
-                discount = 0.997,
                 initial_entropy = 1.0):
         # init parameters
         input_shape = (None, *state_shape)
