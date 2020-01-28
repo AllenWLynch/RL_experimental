@@ -3,6 +3,8 @@ from collections import namedtuple
 import random
 import tensorflow as tf
 import threading
+import datetime
+import os
 
 class RL_Algo():
 
@@ -15,72 +17,10 @@ class RL_Algo():
 def unzip_batch_samples(batch):
     return map(lambda x : np.array(x), list(zip(*batch)))
 
-def calculate_priority(self, td_errors, nu):
+def calculate_priority(td_errors, nu):
     # p = η maxi δi + (1 − η)δ-
     assert(len(td_errors.shape) == 2), 'td_errors must be of shape (m, n), where m = batch_size, n = sequence length'
     return nu * np.max(td_errors, axis = -1, keepdims= True) + (1 - nu) * np.mean(td_errors, axis = -1, keepdims= True)
-
-class Agent():
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError()
-
-    def get_action(self, state):
-        raise NotImplementedError()
-
-class SequentialAgent(Agent):
-
-    def get_action(self, state, is_state):
-        raise NotImplementedError()
-
-class RandomAgent(Agent):
-
-    def __init__(self, num_actions):
-        self.num_actions = 2
-
-    def get_action(self, state, state_mask = None):
-        return int(np.random.choice(np.arange(self.num_actions)))
-
-class PolicyAgent(Agent):
-
-    def __init__(self, policy, noise = 0):
-        assert(False), 'Dont use this one use the prioritized guy'
-        self.policy = policy
-        self.noise = noise
-        #self.num_actions = num_actions
-
-    def get_action(self, state, state_mask = None):
-        policy_output = self.policy(np.expand_dims(state, 0))[0]
-        distribution = (policy_output).numpy()
-        if self.noise > 0:
-            raise NotImplementedError()
-
-        return np.random.choice(len(distribution), p = distribution)
-
-class PrioritizedPolicyAgent(PolicyAgent):
-
-    def __init__(self, policy, q_net, q_targ, discount):
-        self.policy = policy
-        self.q_net = q_net
-        self.q_targ = q_targ
-        self.discount = discount
-        self.noise = 0
-
-    def estimate_batch_priorities(self, batch):
-        state, action, rewards, next_states, dones = unzip_batch_samples(batch)
-
-        q_vals = tf.gather(self.q_net(state), action, axis = -1, batch_dims = 1)
-
-        next_qs = self.q_targ(next_states)
-        max_next_action = tf.math.argmax(next_qs, axis = -1)
-        
-        max_next_action = tf.reshape(max_next_action, (-1,1))
-
-        v_estimates = tf.gather(next_qs, max_next_action, axis = -1, batch_dims = 1)
-
-        q_target = rewards + self.discount * (1. - tf.dtypes.cast(dones, 'float32')) * v_estimates
-
-        return tf.math.abs(q_vals - q_target).numpy().reshape(-1) 
 
 class NaiveReplay():
 
@@ -88,16 +28,19 @@ class NaiveReplay():
         self.size = size
         self.memory = []
 
-    def add(self, *args):
+    def add(self, sample):
         if len(self.memory) > self.size:
             self.memory.pop()
-        self.memory.insert(0, MarkovTransition(*args))
+        self.memory.insert(0, sample)
 
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        return random.sample(self.memory, batch_size), np.random.rand(batch_size, 1), 1.0
 
     def num_samples(self):
         return len(self.memory)
+
+    def update(self, *args):
+        pass
 
 #remake this
 def get_n_step_Q_targets(reward_sequence, lookahead_steps, done, discount, last_V_estimate):
@@ -128,15 +71,26 @@ def get_n_step_Q_targets(reward_sequence, lookahead_steps, done, discount, last_
 
     return np.squeeze(reward_sums)[:,:-1]
 
-'''r = np.array([[1,2,3,4],[2,4,6,8]])
-V = np.array([[5],[10]])
-done = np.array([[True],[False]])
-discount = 0.5
-print(get_Q_targets(r, done, discount, V))'''
 
 InteractionSequence = namedtuple('InteractionSequence', ('states','actions','rewards','is_state','done'))
-
 MarkovTransition = namedtuple('MarkovTransition', ('state','action','reward','next_state', 'done'))
+
+class Episode():
+
+    def __init__(self):
+        self.returns = 0
+        self.steps = 0
+        self.terminal = 0
+
+    def track(self, reward, done):
+        self.returns += reward
+        self.steps += 1
+        if done:
+            self.terminal = True
+
+    def result(self):
+        return (self.returns, self.returns/self.steps), ('Total returns', 'Returns per step')
+
 
 class MarkovStateManager():
     
@@ -154,7 +108,7 @@ class MarkovStateManager():
 
         self.state_shape = self.infer_state_shape(self.phi(self.env.reset(), None))
         #blank_state_shape = self.infer_state_shape(self.state_generator())
-        
+    
         #assert(example_state_shape == blank_state_shape), 'States from preprocessing funtion and blank state generator must have the same shape: {} vs. {}'.format(str(example_state_shape), str(blank_state_generator))
         self.reset()
         
@@ -166,6 +120,7 @@ class MarkovStateManager():
         self.t = 0
         #self.interaction_history = [Interaction(self.state_generator(), 0, 0, False) for i in range(self.seq_len)]
         self.state = self.phi(self.env.reset(), None)
+        self.episode = Episode()
         #self.save_memory(self.state, 0, 0)
 
     def infer_state_shape(self, state):
@@ -199,7 +154,9 @@ class MarkovStateManager():
             if self.render:
                 self.env.render()
 
-            yield MarkovTransition(self.state, [action], [reward], next_state, [done])
+            self.episode.track(reward, done)
+
+            yield MarkovTransition(self.state, [action], [reward], next_state, [done]), self.episode.result() if self.episode.terminal else False
 
             self.state = next_state
 
@@ -283,15 +240,22 @@ class SequentialStateManager(MarkovStateManager):
 
 class PrioritizedLearner():
 
-    def __init__(self, rl_algo, steps_per_epoch, batch_size, priority_nu = 0.7, checkpoint_every = 10, logdir = './logs'):
+    def __init__(self, rl_algo, steps_per_epoch, batch_size, priority_nu = 1.0, checkpoint_every = 10, log_every = 50, logdir = 'logs'):
 
         self.algo = rl_algo
-        self.logger = tf.summary.create_file_writer(logdir)
         self.train_steps = 0
         self.checkpoint_every = checkpoint_every
         self.steps_per_epoch = steps_per_epoch
         self.batch_size = batch_size
         self.nu = priority_nu
+        self.logger = tf.summary.create_file_writer(
+            os.path.join(
+                logdir,
+                "fit/",
+                datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            ))
+        self.log_every = log_every
+        self.episodes = 0
 
     def update_step(self, prioritized_replay_sample):
 
@@ -312,19 +276,30 @@ class PrioritizedLearner():
 
         td_errors = calculate_priority(td_errors, self.nu)
 
-        with self.logger.as_default():
-            for (val, metric) in zip(vals, metric_names):
-                tf.summary.scalar(metric, val, step = self.train_steps)
+        if self.train_steps % self.log_every == 0:
+            with self.logger.as_default():
+                for (val, metric) in zip(vals, metric_names):
+                    tf.summary.scalar(metric, val, step = self.train_steps)
 
         return idx, td_errors.reshape(-1)
 
-def train_prioritized_undistributed(actor, learner, memory, env_steps = 1):
+    def log_episode(self, vals, metric_names):
+        with self.logger.as_default():
+            for (val, metric) in zip(vals, metric_names):
+                tf.summary.scalar(metric, val, step = self.episodes)
+        self.episodes += 1
 
-    actor_iter = iter(actor.run())
+    def train_undistributed(self, actor, memory, env_steps = 1):
+        actor_iter = iter(actor.run())
 
-    while True:
-        for i in range(env_steps):
-            memory.add(next(actor_iter))
-        if memory.num_samples() > learner.batch_size:
-            for idx, error in zip(*learner.update_step(memory.sample(learner.batch_size))):
-                memory.update(idx, error)
+        while True:
+            for i in range(env_steps):
+                transition, episode = next(actor_iter)
+                memory.add(transition)
+                if not (episode is False):
+                    self.log_episode(*episode)
+            if memory.num_samples() > self.batch_size:
+                for idx, error in zip(*self.update_step(memory.sample(self.batch_size))):
+                    memory.update(idx, error)
+
+    

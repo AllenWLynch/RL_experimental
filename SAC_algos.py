@@ -94,11 +94,10 @@ class MarkovDuelingDiscreteSAC(RL_Algo):
             q1_loss = tf.reduce_mean(weights * q1_loss)
             q2_loss = tf.reduce_mean(weights * q2_loss)
 
+        entropy_grad = entropy_tape.gradient(mean_entropy_loss, self.entropy_weight)
         q1_grads = tape.gradient(q1_loss, self.q1.trainable_weights)
         q2_grads = tape.gradient(q2_loss, self.q2.trainable_weights)
         policy_grads = tape.gradient(policy_loss, self.policy.trainable_weights)
-        entropy_grad = tape.gradient(mean_entropy_loss, self.entropy_weight)
-
         del tape
 
         self.q1_opt.apply_gradients(zip(q1_grads, self.q1.trainable_weights))
@@ -112,7 +111,7 @@ class MarkovDuelingDiscreteSAC(RL_Algo):
         all_td_errors = tf.concat([td_error1, td_error2], axis = -1)
         mean_td_error = tf.reduce_mean(all_td_errors)
         
-        return all_td_errors, (q1_loss, q2_loss, policy_loss, mean_entropy_loss, mean_td_error), ('Q1 loss', 'Q2 loss', 'Policy loss', 'Entropy loss', 'TD error')
+        return all_td_errors, (q1_loss, q2_loss, policy_loss, mean_entropy_loss, mean_td_error, self.entropy_weight), ('Q1 loss', 'Q2 loss', 'Policy loss', 'Entropy loss', 'TD error', 'Entropy Weight')
 
         
 class SequentialDuelingDiscreteSAC(RL_Algo):
